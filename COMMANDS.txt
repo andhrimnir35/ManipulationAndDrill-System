@@ -1,0 +1,1155 @@
+Manipulation and Drill System - F401 Command Reference
+=====================================================
+
+This file describes the text commands implemented by the STM32F401 firmware.
+Commands can arrive through the Raspberry Pi GUI -> H7 -> F401 chain, or be
+entered directly in a terminal through an FTDI adapter on the F401 UART pins.
+
+
+UART format
+-----------
+- Baud rate: 115200.
+- F401 UART: PA3=RX, PA2=TX.
+- Line endings: CR, LF or CRLF.
+- Commands are case-insensitive. HELP, help and Help are equivalent.
+- Responses usually begin with OK, ERR, CONFIRM or ACK.
+- F401 boots into SAFE mode. Motors remain disabled until a mode is selected.
+- By default, F401 sends a single-line live status packet to H7 every 250 ms.
+  The interval can be changed at runtime with set telemetry. The line begins
+  with MODE: and updates the table in the GUI:
+
+  MODE:<arm|armtest|drill|safe> STOPMODE:<coast|brake|hybrid> J1_PWM:<pwm> J1_DIR:<direction> J1_EN:<0|1> J1_ANGLE:<angle|NA> J1_VEL_DPS:<vel_dps|NA> ... J6_PWM:<pwm> J6_DIR:<direction> J6_EN:<0|1> J6_ANGLE:<angle|NA> J6_VEL_DPS:<vel_dps|NA>
+
+  J1..J3 angle/velocity values come from AS5600 readings. If a sensor cannot
+  be read, or an output has no sensor (J4..J6), ANGLE and VEL_DPS are NA.
+  Command responses still appear in the terminal as OK/ERR/AS5600/SENSOR lines.
+
+Basic responses expected during boot:
+  OK BOOT UART READY
+  OK BOOT I2C READY
+  OK BOOT SETTINGS FLASH
+    or
+  OK BOOT SETTINGS DEFAULT_RAM
+  OK BOOT SETTINGS READY
+  OK BOOT MODE SAFE
+
+BOOT SETTINGS FLASH:
+  Valid settings were loaded from flash.
+
+BOOT SETTINGS DEFAULT_RAM:
+  Flash settings were invalid or had an incompatible version. Defaults were
+  loaded into RAM. Run save to make these settings persistent.
+
+
+General behavior
+----------------
+- ARM commands operate only in ARM mode.
+- ARMTEST requires an explicit user request and confirmation. It allows manual
+  ARM driving; BP, goto/rotate and hold are disabled.
+- DRILL commands operate only in DRILL mode.
+- Changing mode first coast-stops all motors, disables servo PWM, invalidates
+  the servo reference and switches all four relays OFF.
+- stopall/allstop always coast-stops the motors, disables servo PWM,
+  invalidates the servo reference and switches all four relays OFF.
+- In ARM mode, parameterless stop uses each axis's stopmode setting. It also
+  disables servo PWM, invalidates the servo reference and switches all four
+  relays OFF. `stop <j>` stops only the specified axis.
+- Setting commands update RAM first. A separate save command is needed to
+  retain the settings after power loss.
+- save is accepted only in SAFE mode with all motor outputs disabled.
+- F401 does not automatically apply STOP ALL or MODE_SAFE because of UART
+  silence. `hb` and `heartbeat` are silently accepted for backward compatibility.
+
+
+Core commands
+-------------
+help
+  Prints a short command list.
+
+params
+  Prints the active mode and all settings:
+  INVERT, MAXPWM, DEFAULT, POSGAIN, NEGGAIN, DEAD, STOPMODE,
+  KP, KD, MINPWM, TOL, KEYFWD, KEYBACK and AS5600 for J1..J6.
+  Also prints BPREACT_MS, BPDECEL_DPS2, BPLEAD_DEG, BPCLEAR_DEG,
+  BPRECPWM and BPRECTIME_MS for J1..J3.
+  Prints BP1..BP4 MODE/ANGLE lines for each of J1..J3.
+  Also prints ELV (including SENDPWM_BTS4/SENDPWM_BTS5), DRILL
+  and TELEMETRY_MS values.
+
+get mode
+  Prints the current mode: SAFE, ARM, ARMTEST or DRILL.
+
+get status
+  Prints the current live status packet once, in the same format as the
+  continuous MODE: telemetry line.
+
+get telemetry
+  Reports the interval, in ms, between F401 live status packets sent to H7.
+  Example response:
+    OK TELEMETRY_MS=250
+
+get fault
+  Prints status/fault flags.
+
+  Fields:
+  SENSOR_BITS=0x...
+    J1..J3 sensor read flags. Bit0=J1, Bit1=J2, Bit2=J3.
+    The corresponding bit clears after a successful sensor read.
+
+  BRAKEPOINT_BITS=0x...
+    Actual J1..J3 breakpoint fault flags. A normal BP stop is not a fault.
+
+  Jx_BP_ACTIVE and Jx_BP_REASON
+    Report the active boundary identity and the recovery fault reason.
+
+  PENDING=0..4
+    0: no confirmation pending
+    1: awaiting mode arm confirmation
+    2: awaiting mode drill confirmation
+    3: awaiting mode armtest confirmation
+    4: awaiting factoryreset confirmation
+
+  STREAM_AS5600=1
+    AS5600 streaming is active.
+
+  SETTINGS_DIRTY=1
+    Settings have changed in RAM but have not been saved to flash.
+
+  SETTINGS_FLASH=1
+    Valid settings were loaded from flash during boot.
+
+get motors
+  Prints physical BTS output states:
+  DIR, PWM, BRAKE and EN for M1..M6.
+  Then prints two elevator-specific telemetry lines:
+    ELV_BTS4 REQUESTED_PWM=<signed_pwm> ACTUAL_PWM=<signed_pwm>
+    ELV_BTS5 REQUESTED_PWM=<signed_pwm> ACTUAL_PWM=<signed_pwm>
+  REQUESTED_PWM is the elevator request before sendpwm is applied.
+  ACTUAL_PWM is the actual driver PWM after sendpwm scaling and flooring.
+  These fields are signed; they are 0 when stopped or outside elevator use.
+
+  M1: BTS1 / J1 base
+  M2: BTS2 / J2 shoulder
+  M3: BTS3 / J3 elbow
+  M4: BTS4 / J4 wrist motor 1 or elevator A
+  M5: BTS5 / J5 wrist motor 2 or elevator B
+  M6: BTS6 / J6 gripper or drill
+
+get sensors
+  Reads the J1..J3 AS5600 sensors through TCA9548A channels 0, 1, 2.
+  Prints corrected angles and encoder velocity estimates:
+  SENSOR J1 CH=0 DEG=... VEL_DPS=... STATUS=...
+
+  If a sensor cannot be read:
+  SENSOR Jx CH=<channel|OFF> ERR=READ_FAIL
+
+  Magnet status values:
+  NO_MAGNET, MAGNET_WEAK, MAGNET_STRONG, MAGNET_OK.
+  MAGNET_WEAK alone currently does not block position commands.
+
+get as5600
+  Scans TCA9548A channels 0..7 and prints every AS5600 found:
+  AS5600 CH=<n> RAW=<0..4095> DEG=<0..360> STATUS=...
+
+get as5600 <channel>
+  Reads only the specified TCA channel.
+  channel: 0..7.
+
+stream as5600 <channel> [interval_ms]
+  Continuously prints AS5600 data.
+  channel: 0..7.
+  interval_ms: optional, 50..5000. Defaults to 250 ms if omitted.
+
+stream off
+stream stop
+  Stops the active AS5600 stream.
+
+set telemetry <100..60000>
+  Changes the interval, in ms, between H7 live status packets beginning
+  with MODE:. Example:
+    set telemetry 100
+    OK TELEMETRY_MS=100
+
+  This is a runtime setting; save does not write it to flash. F401 reverts to
+  the default of 250 ms after a restart. H7 must resend its desired value at
+  startup if needed. The 100 ms lower limit prevents the long telemetry line
+  from overloading the 115200 baud UART link.
+
+seq <id> <command>
+  Executes a command. Responses using sendOk/sendErr are prefixed with ACK <id>.
+  Example:
+    seq 42 set 1 maxpwm 180
+    ACK 42 OK UPDATED_RAM
+
+  Note: some commands printing multi-line status, such as params/get, do not
+  prefix every line with ACK. For Raspberry/H7 integration, use seq for
+  critical set/drive commands.
+
+hb
+heartbeat
+  Silently accepted for backward compatibility; produces no response line.
+  F401 has no UART inactivity/link watchdog, so these commands do not affect
+  the mode or motor outputs.
+
+save
+  Writes RAM settings to flash.
+  Accepted only in SAFE mode with all motor outputs stopped.
+
+  Successful sequence:
+    OK SAVE_BEGIN
+    OK SAVED_FLASH
+
+  Error cases:
+    ERR SAVE_REQUIRES_SAFE
+    ERR SAVE_REQUIRES_STOPPED
+
+quit
+exit
+  Coast-stops all motors, disables servo PWM and relays, cancels active
+  targets and switches to SAFE mode. Can be used when exiting Python/the GUI.
+
+failsafe linkloss
+failsafe timeout
+  H7/GUI communication-loss handling. Stops all motors and relays, disables
+  servo PWM, invalidates its reference and switches to SAFE mode.
+
+failsafe gamepad
+joy disconnect
+joy lost
+  Gamepad-loss handling. Applies the same global safe stop and enters SAFE mode.
+
+failsafe estop
+estop
+  Emergency-stop handling. Applies the same global safe stop, enters SAFE mode
+  and sets the servo telemetry SAFETY field to ESTOP.
+
+
+Mode commands
+-------------
+mode
+  Prints the current mode.
+
+mode safe
+mode none
+  Coast-stops all motors and switches to SAFE mode.
+
+mode arm
+  Requests confirmation:
+    CONFIRM MODE ARM? Y/N
+
+mode armtest
+  Requests explicit confirmation for manual test mode, which bypasses BP and
+  encoder-based position control. The firmware never enters this mode on boot
+  or automatically:
+    CONFIRM MODE ARMTEST? BP/GOTO/HOLD BYPASSED, MANUAL ONLY. Y/N
+
+mode drill
+  Requests confirmation:
+    CONFIRM MODE DRILL? Y/N
+
+y
+yes
+  Accepts the pending confirmation.
+
+n
+no
+  Cancels the pending confirmation.
+
+mode arm confirm
+  Enters ARM mode without an additional confirmation prompt.
+
+mode armtest confirm
+  Enters ARMTEST mode without an additional prompt. This command itself counts
+  as an explicit user request. stop/stopall, max PWM and SAFE transitions remain
+  active.
+
+mode drill confirm
+  Enters DRILL mode without an additional confirmation prompt.
+
+Safety commands also accepted while confirmation is pending:
+  mode safe / mode none
+  stop
+  stop <j>
+  stopall / allstop
+  quit / exit
+
+
+ARM manual drive commands
+-------------------------
+These commands work in ARM and ARMTEST modes. ARMTEST provides manual driving
+only; BP, goto/rotate and hold are not applied.
+
+forward <j> [pwm]
+backward <j> [pwm]
+  j: 1..6.
+  pwm: optional, 0..255. If omitted, the axis's DEFAULT PWM value is used.
+
+  POSGAIN/NEGGAIN is applied, then the result is limited by MAXPWM.
+  INVERT=1 reverses the logical direction.
+
+  J1: physical base motor.
+  J2: physical shoulder motor.
+  J3: physical elbow motor.
+  J4: virtual wrist pitch.
+  J5: virtual wrist twist.
+  J6: physical gripper motor.
+
+axis <j> <-1000..1000>
+  Analog axis command for the joystick/Raspberry bridge.
+  Positive values mean forward; negative values mean backward.
+  Values inside DEAD stop the corresponding axis.
+  At full stick travel, the requested PWM is the axis's MAXPWM value.
+  POSGAIN/NEGGAIN and INVERT settings are applied by F401.
+  DEFAULT PWM is not used by this analog axis command; DEFAULT is used only
+  for forward/backward without an explicit PWM and for digital keybind driving.
+
+  Example:
+    set 1 dead 50
+    axis 1 40    -> inside deadband, J1 stops
+    axis 1 800   -> J1 forward, approximately 80% maxpwm
+    axis 1 -800  -> J1 backward, approximately 80% maxpwm
+
+stop <j>
+  Stops the specified ARM axis.
+  For J1..J3, cancels any active goto/rotate target.
+  For J4 or J5, stops both wrist motors because these are virtual axes.
+
+stop
+  Stops all ARM axes.
+  In ARM mode, applies coast/brake/hold/hybrid behavior according to each
+  axis's stopmode setting.
+
+stopall
+allstop
+  Immediately coast-stops all physical BTS outputs.
+  Does not use stopmode settings.
+
+
+Joystick event commands
+------------------------
+These commands allow a PC/Raspberry/H7 bridge to send raw joystick events.
+Use tools/joystick_direct_f401.py for testing.
+
+joy axis <j> <-1000..1000>
+  Behaves the same as axis <j> <-1000..1000>.
+  Can be used for analog stick data.
+
+joy button <button_id> <0|1>
+joy btn <button_id> <0|1>
+  Sends a button press/release event.
+  button_id: 0..32767.
+  state: 1 pressed, 0 released.
+
+  F401 matches button_id against KEYFWD/KEYBACK settings.
+  Pressing a button drives the corresponding axis at DEFAULT PWM.
+  Releasing the button stops the corresponding axis.
+  If forward and backward buttons for the same axis are active simultaneously,
+  the axis stops.
+
+  This command drives motors only in ARM mode.
+  Returns OK JOY_IGNORED if no binding matches.
+
+Default synthetic D-pad IDs:
+  hat 0 up    = 1000
+  hat 0 down  = 1001
+  hat 0 left  = 1002
+  hat 0 right = 1003
+
+Default keybind:
+  J4 KEYFWD=1000, KEYBACK=1001  -> D-pad up/down pitch
+  J6 KEYFWD=1003, KEYBACK=1002  -> D-pad right/left gripper
+
+
+Virtual wrist axis mapping
+---------------------------
+J4 pitch is a virtual axis:
+  forward 4  -> M4 forward,  M5 forward
+  backward 4 -> M4 backward, M5 backward
+
+J5 twist is a virtual axis:
+  forward 5  -> M4 forward,  M5 backward
+  backward 5 -> M4 backward, M5 forward
+
+J4/J5 are not independent direct motor commands. forward 4/backward 4 control
+pitch, and forward 5/backward 5 control twist.
+
+
+J1-J3 position and sensor commands
+----------------------------------
+These commands apply only to J1, J2, J3.
+AS5600 sensors are read through the TCA9548A:
+  J1 -> TCA channel 0
+  J2 -> TCA channel 1
+  J3 -> TCA channel 2
+
+Default mapping:
+  CH0 -> J1 / BTS1 Base
+  CH1 -> J2 / BTS2 Shoulder
+  CH2 -> J3 / BTS3 Elbow
+
+zero <j>
+  j: 1..3.
+  Stores the current raw sensor angle in RAM as the joint's zero offset.
+  Successful response:
+    OK ZERO_UPDATED_RAM
+  Rejected if any BP is enabled on the axis, to avoid shifting the physical
+  boundaries:
+    ERR ZERO J=<j> REASON=BP_ENABLED
+
+  Run save afterward to persist the setting.
+
+goto <j> <angle>
+  j: 1..3.
+  angle: any number.
+  Normalizes the target angle to the 0..360 circle and follows the shortest path.
+  Applies stop/hold behavior when the target enters tolerance.
+
+rotate <j> <angle>
+move <j> <angle>
+  j: 1..3.
+  Adds a relative movement to the current corrected angle.
+  Example: rotate 2 -30
+
+If a sensor cannot be read, goto/rotate/HOLD/BP are temporarily disabled and
+new position commands return ERR SENSOR_NOT_READY. The previous target does
+not resume automatically. These features become available again when valid
+sensor data returns. Sensor faults do not block manual forward/backward/axis
+commands.
+
+set <j> as5600 <channel>
+  j: 1..3.
+  channel: 0..7.
+  Changes the AS5600 channel for the specified joint.
+
+set <j> as5600 -1
+  Disables AS5600 readings for the specified joint.
+
+
+Position control settings
+-------------------------
+Position control applies only to J1..J3.
+
+KP:
+  Proportional gain in the PWM calculation.
+  Approximate calculation used in the code:
+    pwm = abs(error_deg) * KP / 1000
+
+KD:
+  Damping based on encoder velocity.
+  The code uses signed PD:
+    control = KP * error - KD * velocity
+  This reduces power when moving quickly toward the target and increases
+  opposing active holding/braking when moving away from it.
+  Firmware low-pass filters the velocity measurement to reduce rapid motor
+  direction changes caused by encoder jitter.
+
+MINPWM:
+  Minimum PWM used outside the target tolerance.
+
+TOLERANCE:
+  Target acceptance tolerance, in degrees.
+
+
+ARM tuning and safety commands
+------------------------------
+All set commands update RAM immediately and return OK UPDATED_RAM.
+Run save to persist these settings.
+
+set <j> invert <0|1>
+  Reverses the axis's logical direction.
+
+set <j> maxpwm <0..255>
+  Limits the axis's maximum PWM.
+  DEFAULT and MINPWM are clamped if they exceed this value.
+
+set <j> default <0..255>
+  Sets the axis's default PWM. The value is limited by MAXPWM.
+
+set <j> posgain <100..3000>
+  Forward/positive direction sensitivity multiplier.
+  1000 = 1.00x.
+  1500 = 1.50x.
+
+set <j> neggain <100..3000>
+  Backward/negative direction sensitivity multiplier.
+  1000 = 1.00x.
+
+set <j> dead <0..400>
+  Joystick deadband value.
+  50 = approximately 5%.
+  400 = approximately 40%.
+
+set <j> keybind <button_id>
+set <j> keyfwd <button_id>
+set <j> keyforward <button_id>
+  Sets the axis's positive/forward digital button binding.
+  button_id: 0..32767.
+  Use -1 to disable the binding.
+
+set <j> negkeybind <button_id>
+set <j> keyback <button_id>
+set <j> keybackward <button_id>
+  Sets the axis's negative/backward digital button binding.
+  button_id: 0..32767.
+  Use -1 to disable the binding.
+
+set <j> as5600 <0..7>
+  Sets the AS5600 mux channel for J1..J3.
+  Default: J1=0, J2=1, J3=2.
+
+set <j> as5600 -1
+  Disables the sensor channel for J1..J3.
+
+set <j> kp <0..10000>
+  J1..J3 position control P gain.
+  Default: 3000.
+
+set <j> kd <0..10000>
+  J1..J3 position control velocity damping gain.
+  Default: 0.
+
+set <j> minpwm <0..255>
+  J1..J3 position control minimum PWM.
+  Default: 35.
+
+set <j> tolerance <0.1..20.0>
+  J1..J3 position target tolerance, in degrees.
+  Default: 0.8.
+
+set <j> stopmode coast
+  Sets PWM=0, EN=LOW. The motor coasts freely.
+
+set <j> stopmode brake
+  Applies a short active braking pulse.
+  BTS output uses EN=HIGH, RPWM=255, LPWM=255 for approximately 120 ms.
+  Do not use under load before a low-voltage bench test.
+
+set <j> stopmode hold
+  Attempts to hold the current angle as the target for J1..J3.
+  Falls back to coast if the sensor cannot be read.
+  Behaves like coast for J4..J6, which lack holding hardware/sensors.
+  Used for active PID braking/holding.
+  In hold mode, the motor coasts after reaching the target; to re-engage,
+  the error must exceed a wider re-engagement band. This hysteresis reduces
+  oscillation between directions.
+
+set <j> stopmode hybrid
+  For J1..J3, applies a short brake pulse, then a hold target if a sensor exists.
+  Without a sensor, behavior is limited to the brake pulse.
+  Active PID holding begins after the brake pulse finishes.
+
+Position controller internal behavior:
+  - AS5600 reads are independent of telemetry. One TCA mux channel is read
+    every 1 ms; with the three default active channels, each axis updates
+    at approximately 333 Hz.
+  - Position control runs every 5 ms (200 Hz), using the latest sensor
+    snapshot. The control loop does not reread the AS5600.
+  - VEL_DPS uses the actual microsecond dt between two valid samples.
+    The 0/360 transition uses shortest-angle correction, and a 12 Hz
+    first-order low-pass filter is applied using the actual dt.
+  - A single I2C error preserves the last valid value. If no valid sample
+    arrives for 50 ms, goto/rotate/HOLD/BP runtime is canceled. Any active
+    encoder-controlled output stops; direct manual PWM is not cut solely
+    for this reason. The first valid sample clears the sensor fault and
+    makes the features available again.
+  - PID output is ramped; PWM does not jump instantly from 0->255 or 255->0.
+  - Direction changes include a short coast interval.
+  - In hold mode, the motor remains off/coasting inside tolerance at low speed.
+
+set <j> bp <slot> <mode> <angle>
+  j: 1..3, slot: 1..4.
+  mode:
+    wall
+      Locks the side from which the BP was approached.
+    block_increase
+      Prevents the logical AS5600 angle from increasing past the BP.
+    block_decrease
+      Prevents the logical AS5600 angle from decreasing past the BP.
+
+  Example:
+    set 2 bp 1 wall 90
+    set 2 bp 2 block_increase 165
+
+set <j> bp <slot> off
+  Disables the specified BP slot.
+
+  BP configuration can change only while the selected joint is completely
+  stopped, with no active target or BP runtime. Invalid settings return
+  ERR BP_CONFIG with J, slot, boundary and REASON fields. Duplicate boundaries
+  and recovery routes blocked by another BP are rejected.
+
+  The multi-BP controller locks the identity of the first threatening boundary
+  throughout braking/recovery. The final motor output gate checks manual,
+  joystick, goto, PID and recovery outputs against all BPs. If a goto/rotate
+  path crosses a forbidden BP, ERR TARGET_BLOCKED_BP is returned before motion.
+
+  After braking completes and encoder speed falls, the joint automatically
+  recovers to the permitted side of the BP using low, limited PWM.
+
+  Braking approach distance is calculated per axis using:
+    speed * BPREACT_MS / 1000
+      + speed^2 / (2 * BPDECEL_DPS2)
+      + BPLEAD_DEG
+  The result is clamped to 1..45 degrees. The motor runs toward the BP at full
+  commanded PWM; upon entering the estimated stopping distance, drive PWM is
+  zeroed and active braking is applied.
+
+set <j> bpreact <0..500>
+  Control/electrical reaction allowance, in milliseconds. Higher means earlier
+  braking. Default J1/J2/J3: 40 / 40 / 40 ms.
+
+set <j> bpdecel <50..20000>
+  Estimated braking deceleration, in degrees/second^2. Lower means earlier
+  braking. Default J1/J2/J3: 500 / 350 / 650 dps^2.
+  J2 starts more conservatively because it is heavier/more affected by load.
+
+set <j> bplead <0.1..20.0>
+  Fixed safety distance added to the braking estimate, in degrees.
+  Default J1/J2/J3: 0.6 / 0.8 / 0.6 degrees.
+
+set <j> bpclear <0.2..20.0>
+  Minimum clearance to preserve on the safe side of the original BP after
+  recovery completes.
+  Effective clearance is at least max(BPCLEAR, 2*TOLERANCE, 0.5 degrees).
+  The recovery target is placed an additional stopping tolerance beyond this
+  limit. Default J1/J2/J3: 0.8 / 1.0 / 0.8 degrees.
+
+set <j> bprecpwm <0..255>
+  Maximum automatic recovery PWM. Normal MAXPWM also applies.
+  0 disables automatic recovery; directional guards and manual retreat remain.
+  Default J1/J2/J3: 70 / 90 / 65.
+
+set <j> bprectime <250..10000>
+  Recovery timeout, in milliseconds. No progress for 750 ms also causes a fault.
+  Default J1/J2/J3: 2500 / 3500 / 2500 ms.
+
+  During recovery, J1..J3 manual, goto/rotate and keybind outputs are locked.
+  The active BP identity does not change until recovery ends. The recovery
+  route is rechecked against every other BP. stop, stopall and SAFE can always
+  interrupt recovery. After recovery, the joystick must return to the deadzone
+  before a new movement toward the BP is allowed.
+
+
+DRILL mode commands
+--------------------
+These commands work only in DRILL mode.
+
+Physical BTS use in DRILL mode:
+  M4 / BTS4 -> elevator motor A
+  M5 / BTS5 -> elevator motor B
+  M6 / BTS6 -> drill motor
+
+elv up [pwm]
+  Runs elevator motors A and B in the same direction. Actual PWM may differ
+  between the drivers because of the BTS4/BTS5 sendpwm coefficients.
+
+elv down [pwm]
+  Runs elevator motors A and B in the reverse direction. The coefficient
+  scales PWM magnitude only; it does not change direction.
+
+elv stop
+  Coast-stops elevator motors A and B.
+
+elv default <0..255>
+  Sets the default elevator PWM in RAM. Run save to persist it.
+
+elv invert <0|1>
+  Reverses the elevator's logical direction.
+
+elv maxpwm <0..255>
+  Sets the maximum elevator PWM in RAM.
+  DEFAULT is clamped if it exceeds this value.
+
+set bts4 sendpwm <0.00..1.00>
+set bts5 sendpwm <0.00..1.00>
+  Sets the coefficient applied to the specified driver only during normal
+  elevator movement. Resolution is 0.01. Actual PWM is calculated from the
+  positive magnitude as floor(requested_pwm * sendpwm).
+  Stop, brake, pitch, twist and non-elevator BTS outputs are unaffected.
+  The setting updates RAM immediately; run save in SAFE mode to persist it.
+  sendpwm is not accepted for BTS1/BTS2/BTS3/BTS6.
+
+drill dig [pwm]
+  Runs the drill motor in the dig direction.
+
+drill extract [pwm]
+  Runs the drill motor in the extract direction.
+
+drill stop
+  Coast-stops the drill motor.
+
+drill default <0..255>
+  Sets the default drill PWM in RAM. Run save to persist it.
+
+drill invert <0|1>
+  Reverses the drill's logical direction.
+
+drill maxpwm <0..255>
+  Sets the maximum drill PWM in RAM.
+  DEFAULT is clamped if it exceeds this value.
+
+
+Factory reset
+-------------
+factoryreset
+  Requests confirmation:
+    CONFIRM FACTORY RESET? Y/N
+
+  Y/yes loads default settings into RAM and enters SAFE mode.
+  Run save afterward to persist them.
+
+factoryreset confirm
+  Loads default settings into RAM and enters SAFE mode without another prompt.
+  Run save afterward to persist them.
+
+
+Default settings
+----------------
+- Boot mode: SAFE
+- Default PWM: 100
+- Axis max PWM: 255
+- Axis posgain/neggain: 1000
+- Axis deadband: 50
+- J1..J6 stopmode: coast
+- J1..J3 KP/KD/MINPWM/TOLERANCE: 3000 / 0 / 35 / 0.8 deg
+- J1..J3 zero offset: 0 deg
+- J1..J3 AS5600 channels: 0 / 1 / 2
+- J1..J3 BP slot 1..4: off
+- J1/J2/J3 BP reaction ms: 40 / 40 / 40
+- J1/J2/J3 BP decel dps2: 500 / 350 / 650
+- J1/J2/J3 BP lead deg: 0.6 / 0.8 / 0.6
+- J1/J2/J3 BP clear deg: 0.8 / 1.0 / 0.8
+- J1/J2/J3 BP recovery PWM: 70 / 90 / 65
+- J1/J2/J3 BP recovery timeout ms: 2500 / 3500 / 2500
+- J4 keybind forward/backward: 1000 / 1001
+- J6 keybind forward/backward: 1003 / 1002
+- Other axis keybinds: -1 / -1
+- Elevator invert/max/default/sendpwm BTS4/BTS5: 0 / 255 / 100 / 1.00 / 1.00
+- Drill invert/max/default: 0 / 255 / 100
+- H7 telemetry interval: 250 ms (runtime, resets to default on reboot)
+
+
+Debugger watch measurements
+---------------------------
+The following global symbols can be inspected in the debugger watch window
+without changing the regular telemetry packet:
+  as5600_update_count, telemetry_send_count, as5600_error_count
+  as5600_updates_per_second, telemetry_sends_per_second
+  as5600_errors_per_second
+  as5600_last_dt_us, as5600_min_dt_us, as5600_max_dt_us, as5600_avg_dt_us
+  as5600_last_axis, as5600_velocity_raw_dps
+  as5600_velocity_filtered_dps
+
+axisRuntime[0..2] contains per-axis rawAngle, sensorAngleDeg, angleDeg,
+multiTurnAngleDeg, velocityRawDps, velocityDps and consecutiveReadErrors.
+For breakpoints, inspect activeBrakePointBoundary, brakePointApproach,
+brakePointPhase, brakePointFaultReason, brakePointLeadAtTriggerDeg,
+brakePointRecoveryDirection and brakePointRecoveryTargetDeg.
+
+For detailed temporary UART debugging, add this to build_flags in platformio.ini:
+  -D BREAKPOINT_DEBUG=1
+The BPDBG line reports the active BP identity/mode, approach side, BLOCKED_DIR,
+requested/filtered PWM and braking phase.
+With debugging disabled, the existing UART telemetry format and rate are unchanged.
+
+
+Quick test sequence
+--------------------
+Basic terminal communication:
+  help
+  get mode
+  params
+
+Single-channel AS5600 test:
+  get as5600 0
+  stream as5600 0 250
+  stream off
+
+Active PID hold/braking test, J1 + AS5600 CH0:
+  mode arm confirm
+  get sensors
+  zero 1
+  set 1 as5600 0
+  set 1 stopmode hold
+  set 1 tolerance 0.8
+  set 1 kp 1200
+  set 1 kd 250
+  set 1 minpwm 15
+  stop 1
+
+  J1 now uses its current angle as the hold target.
+  If the motor shaft is moved by hand beyond tolerance, PID attempts to
+  return it to the target. If it moves away in the wrong direction:
+    set 1 invert 1
+
+  If holding force is weak, first increase minpwm gradually within 20..35.
+  If it is still weak, increase kp to 1500, then 2000.
+  If oscillation develops, reduce kp or minpwm and increase kd slightly.
+
+Hybrid braking test:
+  set 1 stopmode hybrid
+  forward 1 80
+  stop 1
+
+  Hybrid first applies a short BTS brake pulse, then switches to PID hold
+  if an AS5600 is available.
+
+Joystick button/keybind test:
+  mode arm confirm
+  joy button 1000 1
+  joy button 1000 0
+  joy button 1001 1
+  joy button 1001 0
+  stop
+
+Example of assigning new button IDs:
+  set 4 keybind 7
+  set 4 negkeybind 6
+  joy button 7 1
+  joy button 7 0
+
+
+Drill tube-selector servo
+=========================
+
+Hardware:
+  PA0 / TIM5_CH1 (AF2), 50 Hz, 800..2200 us.
+  TIM5 is configured directly for a 1 MHz counter. On the 84 MHz F401 build:
+    PSC=83, ARR=19999, CCR1=pulse_us, DIER=0
+  TIM5 uses hardware PWM1 with CCR1 preload. No servo timer interrupt, DMA,
+  analogWrite, Servo library, joystick stream or GUI repeat loop writes the
+  pulse. PWM is disabled at boot and PA0 is held LOW as a GPIO output.
+
+servo pulse 1000
+servo pulse 1500
+servo pulse 2000
+  Production firmware accepts any custom target in 800..2200 us and moves to
+  it with the same non-blocking speed ramp used by state selection. The command
+  returns OK SERVO_FIXED_TARGET_ACCEPTED_US=<target> immediately; wait until
+  telemetry reports MOVING:0 before saving that position with `set servostate`.
+  The last ramp update writes the requested pulse exactly.
+
+servo forward [1..100]
+servo backward [1..100]
+  Performs one small relative pulse move per command. The default omitted step
+  is 10 us. Forward follows increasing logical state order; `invert=1`
+  automatically reverses its physical pulse direction. The GUI sends only one
+  command per click: there is no press-and-hold timer, joystick stream or
+  background repeat loop. A step that would leave 800..2200 us is rejected.
+
+servo pulse off
+  Disables TIM5_CH1 and TIM5, then holds PA0 LOW.
+
+servo diag
+  Reports PWM/validation state and the live timer/pin registers:
+    CLK PSC ARR CCR1 CNT DIER PA0MODE PA0AF PULSE WRITES LASTCHANGE_MS SOURCE
+  For an enabled F401 output, the expected invariant values are CLK=84000000,
+  PSC=83, ARR=19999, DIER=0, PA0MODE=2, PA0AF=2 and VALID=1. CCR1 and PULSE must
+  equal the last requested microsecond target. Re-running `servo diag` must not
+  increase WRITES or change LASTCHANGE_MS.
+
+Isolated firmware:
+  PlatformIO environment: blackpill_f401ce_servo_minimal
+  This build contains only UART, PA0/TIM5, the three immediate pulse commands,
+  diagnostics and stopall. It deliberately excludes tube state, calibration,
+  wiggle, gamepad, motors, relays and the normal application loop. Use this
+  build first when separating fundamental PWM behavior from integration logic.
+  Unlike production firmware, this deliberately isolated diagnostic build
+  still writes its three test pulses immediately.
+
+set servopulse <800..2200>
+  Legacy declaration-only command retained for protocol compatibility. It does
+  not enable PWM or move the servo. New calibration should instead use one
+  explicit `servo pulse <us>` target, then save that unchanged position.
+
+servo manual ...
+servo jog ...
+  Removed. Firmware returns ERR SERVO_MANUAL_REMOVED_USE_SERVO_PULSE. Servo
+  gamepad control is also disabled.
+
+set servostate <1..5>
+  Stores the unchanged current pulse as the exact target for that physical
+  state. Display names are mirrored without changing pulse/state behavior:
+    state 1 = Final lid
+    state 2 = Tube 4
+    state 3 = Tube 3
+    state 4 = Tube 2
+    state 5 = Tube 1
+  It never moves the servo. Saved pulses must be strictly ordered according to
+  `invert`; a crossed or duplicate calibration is rejected with:
+    ERR SERVO_CALIBRATION_ORDER
+
+  Each accepted calibration updates RAM and reports the valid-mask. Run `save`
+  after all five states are calibrated to persist them to flash.
+
+set servocal clear
+  Clears all five stored servo pulse targets and invalidates the runtime state.
+
+servo <1..5>
+  Uses only the individually calibrated pulse for that state. `servo 1`
+  selects Final lid and `servo 5` selects Tube 1. An unsaved target
+  is rejected with ERR SERVO_TARGET_NOT_CALIBRATED; no datasheet angle estimate
+  and no fallback pulse is used. State motion advances non-blockingly at one
+  controlled update per 20 ms servo frame. The last update writes the exact
+  stored target. DRILL mode and an initialized servo state are required.
+
+  The Power HD 1235MG safety window remains 800..2200 us: a 1400 us total
+  pulse span. Expanding that window to 1750 us would require a pulse below
+  800 us or above 2200 us and is therefore deliberately rejected. Five evenly
+  distributed example targets inside the safe window are:
+    800, 1150, 1500, 1850, 2200 us
+  These are calibration starting points only; use the measured physical
+  positions of the actual mechanism.
+
+set servoangle <1..55>
+  Legacy nominal-angle setting retained for protocol compatibility and angle
+  telemetry. It is not used for automatic state targets and is hidden from
+  the GUI. Changing it cannot solve mechanical angle error.
+
+set servowiggleangle <1..30>
+  Sets the independent wiggle amplitude. Default: 5 degrees.
+
+set servospeed <5..120>
+set servo speed <5..120>
+  Sets the real state-transition, custom-pulse and wiggle speed in degrees per
+  second.
+  A lower value creates a longer series of smaller pulse steps; a higher value
+  reaches the same exact target sooner. The one-click Forward/Backward steps
+  are normally so small that they finish in one or a few 20 ms frames.
+
+set servo invert <0|1>
+  Reverses the relationship between increasing tube state and pulse width.
+  Default: 0. Changing it clears all five calibrations because their required
+  pulse ordering reverses; calibrate every state again.
+
+set servo nextkey|prevkey <value>
+  Rejected with ERR SERVO_GAMEPAD_CONTROL_DISABLED. Gamepad control of this
+  servo is intentionally disabled.
+
+servowiggle
+  Runs a non-blocking, approximately two-second wiggle and returns to the
+  current tube state without changing the logical state.
+
+Servo command errors include:
+  ERR SERVO_STATE_NOT_INITIALIZED
+  ERR SERVO_BUSY
+  ERR SERVO_POSITION_UNKNOWN_APPLY_FIXED_PULSE
+  ERR SERVO_REFERENCE_PULSE_UNKNOWN
+  ERR SERVO_TARGET_PULSE_RANGE
+  ERR SERVO_PWM_ACTIVE
+  ERR BAD_SERVO_PULSE_800_2200
+  ERR BAD_SERVO_STATE
+  ERR BAD_SERVO_ANGLE_1_55
+  ERR BAD_SERVO_WIGGLE_ANGLE_1_30
+  ERR BAD_SERVO_SPEED_5_120
+  ERR BAD_SERVO_STEP_1_100
+  ERR SERVO_STEP_RANGE
+  ERR SERVO_MOVE_REJECTED
+  ERR SERVO_CALIBRATION_ORDER
+  ERR SERVO_MANUAL_REMOVED_USE_SERVO_PULSE
+  ERR SERVO_GAMEPAD_CONTROL_DISABLED
+  ERR SERVO_TARGET_NOT_CALIBRATED
+
+Deterministic test and calibration example:
+  mode drill confirm
+  servo pulse 1500
+  servo diag
+  # Observe the fixed position. Choose another single pulse only if needed.
+  servo pulse 1000
+  servo diag
+  set servostate 1
+  servo pulse 1150
+  set servostate 2
+  servo pulse 1500
+  set servostate 3
+  servo pulse 1850
+  set servostate 4
+  servo pulse 2200
+  set servostate 5
+  save
+  Use pulses that match the physical tube positions and preserve their strict
+  order. The example values are placeholders, not a claim about mechanism
+  geometry.
+
+
+Drill LEDs / four-channel relay module
+======================================
+
+DrillLed <1..4> <0|1>
+  1 = logical ON, 0 = logical OFF.
+  The parser is case-insensitive, so DrillLed and drillled are equivalent.
+  DRILL mode is required.
+
+Physical active-LOW mapping:
+  PB4  -> IN1 / Drill LED 1
+  PB13 -> IN2 / Drill LED 2
+  PB14 -> IN3 / Drill LED 3
+  PB15 -> IN4 / Drill LED 4
+
+All four outputs are driven HIGH (OFF) at the beginning of setup. Parameterless
+`stop`, `stopall`, mode changes, failsafe commands, E-stop and gamepad loss all
+switch all four outputs OFF.
+
+
+Drill accessory telemetry
+=========================
+
+The normal MODE status line remains unchanged. Each periodic telemetry update
+adds two short records so the H7 UART8 line buffer is not enlarged:
+
+  SERVO INIT:<0|1> STATE:<NA|1..5> TARGET:<NA|1..5>
+        STATE_NAME:<NA|TUBE_1|TUBE_2|TUBE_3|TUBE_4|FINAL_LID>
+        TARGET_NAME:<NA|TUBE_1|TUBE_2|TUBE_3|TUBE_4|FINAL_LID> MOVING:<0|1>
+        ANGLE:<1..55> WIGGLE:<1..30> INVERT:<0|1> SPEED:<5..120>
+        PWM:<0|1> PULSE:<800..2200> TARGETPULSE:<800..2200>
+        SAFETY:<BOOT|READY|STOP|SAFE_MODE|LINK_LOSS|GAMEPAD_DISCONNECT|
+                CONFIG_CHANGED|FACTORY_RESET|PULSE_RANGE|ESTOP>
+
+  DRILLLEDS LED1:<0|1> LED2:<0|1> LED3:<0|1> LED4:<0|1>
+
+params also prints:
+  SERVO INIT=<0|1> STATE=<NA|1..5> ANGLE=<1..55>
+        WIGGLEANGLE=<1..30> INVERT=<0|1> SPEED=<5..120>
+        KEYNEXT=<-1..32767> KEYPREV=<-1..32767>
+  SERVOREF STATE=<NA|1..5> PULSE=<800..2200> ASSUMED=<0|1> PWM=<0|1>
+
+Every boot starts with:
+  OK BOOT RESET_FLAGS=0x... [BOR] [POR] [PIN] [SOFTWARE] [IWDG] [WWDG]
+Use repeated lines and their decoded flags together with rail/NRST scope
+measurements to distinguish brownout/power-on reset from NRST or watchdog reset.
+
+ARM motor logic test:
+  mode arm confirm
+  forward 1 80
+  stop 1
+  backward 1 80
+  stop
+  mode safe
+
+DRILL logic test:
+  mode drill confirm
+  elv up 80
+  elv stop
+  drill dig 80
+  drill stop
+  mode safe
+
+Persisting RAM settings:
+  mode safe
+  stopall
+  save
+
+BP slot and 0/360 transition test:
+  mode safe
+  set 1 bp 1 block_increase 30
+  set 1 bp 2 block_decrease 300
+  params
+  mode arm confirm
+
+  BP1 prevents the angle from increasing beyond 30 degrees; BP2 prevents it
+  from decreasing below 300 degrees. This protects the 300 -> 360 -> 0 -> 30
+  region with two normal BPs. In a controlled bench setup, first test both
+  directions at low PWM, then goto path preflight and high-PWM braking/recovery.
+
+ARMTEST explicit request test:
+  mode armtest
+  Y
+  forward 1 40
+  stop
+  mode safe
+
+  ARMTEST is never enabled automatically after a reboot or fault. Use it only
+  for controlled tests because BP, goto/rotate and HOLD are bypassed.
+
+
+PC direct joystick bridge
+-------------------------
+To connect a PC gamepad directly to F401 through an FTDI adapter for testing:
+
+  python -m pip install pygame pyserial
+  python tools/joystick_direct_f401.py --list-ports
+  python tools/joystick_direct_f401.py --port COM7 --arm
+
+The script also acts as a serial monitor:
+  - Prints every line received from F401 as F401: ...
+  - Sends normal commands entered in the terminal to F401.
+  - Examples: params, get motors, set 1 maxpwm 180, save.
+
+To calibrate while the joystick is running:
+  1. Start the script:
+       python tools/joystick_direct_f401.py --port COM7 --arm
+  2. Enter commands in the same terminal:
+       params
+       set 1 maxpwm 180
+       set 1 dead 80
+       get motors
+
+Local slash commands control the script and are not forwarded raw to F401:
+  /help        show local monitor commands
+  /pause       pause joystick TX and send stop
+  /resume      resume joystick TX
+  /stop        send stopall
+  /safe        send stopall and mode safe
+  /arm         send mode arm confirm and resume the joystick
+  /drill       send mode drill confirm and pause the joystick
+  /echo on/off enable/disable manual TX echo
+  /joyecho on/off enable/disable joystick TX echo
+  /status      show script status
+  /quit        send stopall and exit the script
+
+To use it only as a serial monitor:
+  python tools/joystick_direct_f401.py --port COM7 --monitor-only
+
+To discover joystick IDs:
+
+  python tools/joystick_direct_f401.py --event-test
+
+Bridge default analog mapping:
+  Left stick X  -> axis 1 / Base
+  Left stick Y  -> axis 2 / Shoulder
+  Right stick Y -> axis 3 / Elbow
+  Right stick X -> axis 5 / Twist
+
+Common pygame axis mapping:
+  0=LX, 1=LY, 3=RX, 4=RY.
+  Some controllers use 2=RX, 3=RY instead. In that case, use a custom map:
+
+  python tools/joystick_direct_f401.py --port COM7 --arm --axis-map "1:0,2:-1,3:-3,5:2"
+
+Axis map format:
+  "joint:axis,joint:-axis"
+  A minus sign means that the specified axis is inverted.
+
+Bridge console:
+  Normal F401 commands can be entered in the terminal while the script runs.
+  Example:
+    set 4 keybind 1000
+    set 4 negkeybind 1001
+    params
+
+Press Ctrl+C or enter /quit to exit the script. The script sends stopall.
+
+
+Safety notes
+------------
+- Verify BTS active braking in a low-voltage bench test before using it
+  under load.
+- J1..J3 position commands depend on sensor readings.
+- A sensor fault temporarily disables goto/rotate/BP/HOLD and cancels the
+  current target; it does not block manual forward/backward/axis commands.
+- ARMTEST bypasses all software BP protections. Enter it only through an
+  explicit user command and return to SAFE as soon as testing finishes.
+- Change BP configuration only with the motor and target completely stopped.
+  Firmware reports the rejected J/slot and reason with ERR BP_CONFIG.
+- While E-STOP is active on H7, repeatedly send STOP ALL/stopall.
+- Power HD 1235MG operates at 6.0..7.4 V; 6.3 V is suitable, but a single
+  servo can draw approximately 7.5 A @ 6 V / 9 A @ 7.4 V at stall. Do not power
+  it from F401/USB. Regulator OUT-, servo GND and F401 GND must share a star
+  reference; servo return current must not flow through board/FTDI/USB GND.
+- The software ramp reduces sudden position errors and current surges; it
+  cannot fix an undersized regulator, thin wires, ground bounce or a mechanical
+  jam.
+- The WeAct V3.0 KEY button pulls PA0 to GND through 330 ohm. Do not press KEY
+  while servo PWM is active.
+- Do not try the corresponding mode commands until M4/M5/M6 motor wiring has
+  been physically changed correctly between the drilling and arm mechanisms.

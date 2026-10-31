@@ -1,0 +1,339 @@
+Manipulation and Drill System - STM32F401 BlackPill Pinout
+=========================================================
+
+Target board
+------------
+PlatformIO board: blackpill_f401ce
+MCU: STM32F401CEU6
+Framework: Arduino STM32
+
+
+Communication
+-------------
+H7 <-> F401 UART:
+  F401 PA2  = USART2 TX -> H7 RX
+  F401 PA3  = USART2 RX <- H7 TX
+  Baud rate = 115200
+  Logic     = 3.3 V TTL UART
+  GND       = common ground required
+
+TCA9548A I2C multiplexer:
+  F401 PB9 = I2C SDA -> TCA9548A SDA
+  F401 PB8 = I2C SCL -> TCA9548A SCL
+TCA9548A address suggestion: 0x70 with A0/A1/A2 tied to GND
+
+Suggested TCA9548A channels:
+  Channel 0 = J1 sensor
+  Channel 1 = J2 sensor
+  Channel 2 = J3 sensor
+
+Firmware default mapping:
+  CH0 -> BTS1 / J1 base
+  CH1 -> BTS2 / J2 shoulder
+  CH2 -> BTS3 / J3 elbow
+
+Runtime remap command:
+  set <j> as5600 <0..7>
+
+
+Drill accessories
+-----------------
+Power HD 1235MG servo:
+  Signal: PA0 = TIM5_CH1
+  PWM:    50 Hz (20,000 us period), 800..2200 us commanded pulse range
+  Power:  external regulated 6.0..7.4 V; 6.3 V is in the rated range
+  Ground: regulator OUT-, servo GND and F401 GND must be common
+
+Do not power this servo from the BlackPill 5 V or 3.3 V pins. Its supply and
+wiring must tolerate the multi-amp startup/stall transient; use a supply with
+at least 8 A transient capacity for one 1235MG, short/thick power wiring and
+local bulk capacitance near the servo (start with 2200 uF low-ESR, 10 V or
+higher, plus 100 nF ceramic; increase toward 4700 uF only after checking the
+regulator's allowed output capacitance/inrush). Route a separate thin reference
+ground from the logic star to regulator OUT-. Do not route servo return current
+through the BlackPill, USB cable, UART adapter ground or a breadboard jumper.
+
+Use 100..220 ohm in series at the PA0 end and 10k from the servo-side signal to
+the common ground. The series resistor limits transient/injection current and
+ringing; the pulldown keeps the servo input LOW while the MCU resets. A level
+shifter or transistor is not normally required for the 3.3 V control signal,
+but the resistor and pulldown do not solve a weak supply or ground bounce.
+
+WeAct BlackPill V3.0 has its onboard KEY pushbutton connected from PA0 to GND
+through 330 ohm. The normally-open button does not conflict with servo PWM, but
+pressing it shorts/distorts the PA0 waveform and must be forbidden while the
+servo is enabled. If accidental button operation is possible, remove/disable
+that KEY path or move the servo to another verified timer channel in a future
+pin revision.
+
+
+Required power and ground topology
+----------------------------------
+Do not power this BlackPill from a classic Arduino Nano +3.3 V pin. Arduino's
+official Nano pinout limits that pin to 50 mA. That has inadequate guaranteed
+margin for the F401 board, startup transients and attached logic. The measured
+F401 rail falling below 3.0 V confirms that the present source/path is already
+failing, regardless of its nominal no-load voltage.
+
+Preferred logic supply:
+  Dedicated regulated 5 V, at least 500 mA (1 A gives useful margin)
+    -> BlackPill 5V input
+  Dedicated logic-supply GND
+    -> logic star point -> BlackPill GND
+
+Alternative:
+  Clean regulated 3.3 V, at least 500 mA
+    -> BlackPill 3V3 pin
+  This bypasses the onboard regulator and must never exceed the MCU/board 3.3 V
+  rail rating. Do not let another 3.3 V or powered USB path fight this source.
+
+Do not connect an external 5 V source and a PC USB 5 V source simultaneously
+unless the exact board power-path/backfeed arrangement has been verified.
+During diagnosis, program with ST-Link or disconnect the external 5 V before
+plugging USB. USB/UART signal grounds may remain a second ground path; use one
+intentional ground connection or an isolated adapter if tests show loop current.
+
+Permanent star wiring:
+
+  Servo regulator OUT+ ===== thick/short ===== Servo +
+  Servo regulator OUT- ===== thick/short ===== Servo -
+
+  Logic supply +5 V -------- separate pair ---- BlackPill 5V
+  Logic supply GND --------- logic star ------- BlackPill GND
+
+  Regulator OUT- ----------- one reference ----- logic star
+  BlackPill PA0 -- 100..220R ------------------ Servo S
+                                  |
+                                 10k
+                                  |
+                              common GND
+
+The high-current loop must be only OUT+ -> servo -> OUT-. The reference wire
+between OUT- and logic star must not carry servo current. If the servo regulator
+input negative and logic-supply negative are already bonded elsewhere, do not
+add several arbitrary parallel ground wires; choose one star/reference topology
+and verify it with power removed.
+
+Place 100..470 uF bulk plus 100 nF ceramic close to the BlackPill logic input.
+Keep the board's normal local decoupling. A ferrite bead/common-mode measure is
+optional only after the supply and return topology is proven. Do not attempt to
+hide a collapsing rail with capacitance alone.
+
+
+Brownout/reset diagnostic sequence
+----------------------------------
+Use a current-limited bench setup first and mechanically unload the servo.
+Prefer an oscilloscope; a multimeter can miss microsecond/millisecond dips.
+
+1. Remove the servo entirely. Join regulator OUT- to the logic star/F401 GND.
+   If F401 resets now, suspect wrong regulator polarity, an isolated/faulty
+   output, a pre-existing second ground path, or a wiring short.
+2. Turn the servo regulator on with no servo attached. Scope F401 3.3 V.
+3. Connect only servo + and - with PA0 disconnected. Check 6 V and 3.3 V.
+4. Connect PA0 through 100..220 ohm but keep PWM disabled. Verify PA0 is LOW.
+5. Start PWM and simultaneously scope servo 6 V, F401 3.3 V, PA0, NRST, and the
+   voltage between regulator OUT- and F401 GND. Probe grounds with short springs.
+6. Repeat with servo mechanically unloaded, then with normal load. Stop if it
+   approaches a hard stop/stall or the 6 V rail collapses.
+7. Remove the Nano USB/PC path and repeat using the dedicated logic supply.
+8. Remove UART/H7/USB-UART connections and repeat; reconnect one at a time.
+9. Power F401 from the dedicated 5 V/500 mA-or-more source and repeat.
+10. Rebuild exactly the single-reference star topology above and repeat the
+    loaded test.
+
+Expected healthy results:
+  F401 3.3 V remains in regulation without dips into reset territory.
+  NRST remains HIGH.
+  OUT--to-F401-GND dynamic difference stays close to 0 V (tens of mV, not
+  hundreds of mV).
+  PA0 remains a 20 ms-period waveform whose HIGH time equals the last explicit
+  pulse command. With no new command, CCR1 and pulse width remain constant.
+  Servo 6 V does not collapse during start/load.
+
+Firmware prints `OK BOOT RESET_FLAGS=0x...` followed by decoded BOR/POR/PIN/
+SOFTWARE/watchdog flags. Repeating boot records prove resets; BOR/POR flags plus
+a scoped rail dip identify supply collapse, while PIN with a stable rail points
+toward NRST noise. Reset flags are supporting evidence, not a substitute for
+scope measurements.
+
+Four-channel active-LOW relay module:
+  PB4  -> IN1
+  PB13 -> IN2
+  PB14 -> IN3
+  PB15 -> IN4
+  5 V  -> VCC
+  GND  -> GND (common with F401 GND)
+
+The pictured board contains one input driver and indicator path per relay, so
+the F401 does not drive the approximately 71 mA relay coils directly. The
+user's actual module has been bench-confirmed to switch correctly from 3.3 V
+GPIO while VCC is 5 V; no extra transistor or level shifter is required for
+this specific board. Four independent outputs are still required.
+
+All four relay GPIOs are driven HIGH for OFF at the start of setup and LOW for
+ON. During MCU reset GPIOs are high impedance, so fit an external 10k pull-up
+from each IN pin to 3.3 V if a relay must be guaranteed OFF through the reset
+window. Do not pull the inputs up to 5 V unless the exact module input circuit
+has been verified. Budget roughly 300 mA at 5 V for four 0.36 W coils plus the
+module indicators/driver losses; 500 mA or more is a practical supply margin.
+
+PB4 is the MCU's reset-default NJTRST/JTAG pin, but the firmware explicitly
+reconfigures it as GPIO and normal two-wire SWD uses only PA13/PA14, so this
+does not conflict with ST-Link SWD. WeAct V3.0 returned the optional SPI-flash
+MISO connection to PA6, so PB4 is not the flash MISO on this board revision.
+
+
+BTS7960 wiring rule
+-------------------
+For each BTS7960 module:
+  R_IS: leave unconnected
+  L_IS: leave unconnected
+  R_EN and L_EN: short together and connect to the listed EN pin
+  RPWM: connect to the listed RPWM pin
+  LPWM: connect to the listed LPWM pin
+  MCU GND and BTS logic GND must be common
+
+Use an external pulldown on each EN line, suggested value 10k, so drivers stay
+disabled while the MCU boots or resets.
+
+For reset-time safety, also add external pulldowns on RPWM and LPWM if possible.
+Suggested values:
+  EN shorted node: 10k to GND
+  RPWM and LPWM: 10k..47k to GND
+
+Reason: during STM32 reset all normal GPIO pins are high impedance until firmware
+configures them. Firmware now drives motor pins low as early as setup starts,
+but external pulldowns are still the real protection for the reset window.
+
+
+Physical BTS mapping
+--------------------
+BTS1:
+  Use: Robot J1 base
+  RPWM: PA8
+  LPWM: PA9
+  EN:   PB12
+
+BTS2:
+  Use: Robot J2 shoulder
+  RPWM: PA10
+  LPWM: PA11
+  EN:   PA12
+
+BTS3:
+  Use: Robot J3 elbow
+  RPWM: PB7
+  LPWM: PB6
+  EN:   PB5
+
+BTS4:
+  Use in ARM mode:   wrist motor 1
+  Use in DRILL mode: elevator motor A
+  RPWM: PB10
+  LPWM: PB1
+  EN:   PB2
+
+BTS5:
+  Use in ARM mode:   wrist motor 2
+  Use in DRILL mode: elevator motor B
+  RPWM: PB0
+  LPWM: PA7
+  EN:   PA4
+
+BTS6:
+  Use in ARM mode:   gripper
+  Use in DRILL mode: drill motor
+  RPWM: PA6
+  LPWM: PA5
+  EN:   PA1
+
+
+Reserved / avoid using
+----------------------
+PA13 = SWDIO, keep for ST-Link/debug/programming
+PA14 = SWCLK, keep for ST-Link/debug/programming
+PA11 = used as BTS2 LPWM in this pinout; do not use USB data with this pinout
+PA12 = used as BTS2 EN in this pinout; do not use USB data with this pinout
+PB8  = I2C SCL, reserved for TCA9548A
+PB9  = I2C SDA, reserved for TCA9548A
+PB6  = used as BTS3 LPWM; this pinout does not use the Arduino default I2C SCL
+PB7  = used as BTS3 RPWM; this pinout does not use the Arduino default I2C SDA
+PA2  = H7 UART TX
+PA3  = H7 UART RX
+PA0  = Power HD 1235MG signal / TIM5_CH1
+PB4  = Relay IN1 (active LOW)
+PB13 = Relay IN2 (active LOW)
+PB14 = Relay IN3 (active LOW)
+PB15 = Relay IN4 (active LOW)
+
+Board-level reservations:
+  PA0 has the onboard KEY-to-GND path described above.
+  The optional underside W25Q SPI flash must not be populated/used with this
+  project: its PA4/PA5/PA6/PA7 signals are already assigned to BTS5/BTS6.
+  Verify clone boards against their own schematic; the statements above apply
+  to the WeAct V3.0 layout selected by PlatformIO.
+
+
+Pin revision note
+-----------------
+This PCB-oriented pinout keeps the left-side BTS7960 control traces on the
+left side of the BlackPill footprint as much as possible, and the right-side
+BTS7960 control traces on the right side.
+
+The TCA9548A I2C bus is intentionally moved from the Arduino STM32 default
+PB7/PB6 pair to the alternate I2C1 pair PB9/PB8. Firmware calls Wire.setSDA(PB9)
+and Wire.setSCL(PB8) before Wire.begin().
+
+The first drafts used PB4/PB5/PB13/PB14/PB15 and then PA0/PA1 as some of the
+BTS4-BTS6 high-frequency motor PWM outputs. Bench logic testing showed those
+choices were unreliable for that BTS role. PB13/PB14/PB15 are therefore used
+only as slow relay GPIOs, not TIM1 complementary motor PWM. PA0 is now dedicated
+to its native TIM5_CH1 at the much slower 50 Hz servo waveform; PA1 remains a
+GPIO EN pin. No listed accessory pin overlaps UART, I2C, SWD or a BTS pin.
+
+
+Mode-dependent motor connection
+-------------------------------
+ARM mode physical connection:
+  BTS1 -> J1 base
+  BTS2 -> J2 shoulder
+  BTS3 -> J3 elbow
+  BTS4 -> wrist motor 1
+  BTS5 -> wrist motor 2
+  BTS6 -> gripper
+
+DRILL mode physical connection:
+  BTS1 -> remains connected to J1 base, but not used by drill commands
+  BTS2 -> remains connected to J2 shoulder, but not used by drill commands
+  BTS3 -> remains connected to J3 elbow, but not used by drill commands
+  BTS4 -> elevator motor A
+  BTS5 -> elevator motor B
+  BTS6 -> drill motor
+
+Before swapping motor wires between ARM and DRILL use:
+  1. Send stopall or mode safe.
+  2. Confirm all motors are stopped.
+  3. Physically swap BTS4/BTS5/BTS6 motor outputs.
+  4. Select the correct mode with mode arm confirm or mode drill confirm.
+
+
+Wrist differential behavior
+---------------------------
+In ARM mode, J4 and J5 are virtual axes, not separate direct motor commands.
+
+J4 pitch:
+  forward 4  -> BTS4 forward and BTS5 forward
+  backward 4 -> BTS4 backward and BTS5 backward
+
+J5 twist:
+  forward 5  -> BTS4 forward and BTS5 backward
+  backward 5 -> BTS4 backward and BTS5 forward
+
+
+Notes for bench testing
+-----------------------
+1. Test without motor power first and measure RPWM/LPWM/EN logic pins.
+2. Test one BTS at low voltage with no mechanical load.
+3. Verify direction for each motor, then use invert commands if needed.
+4. Test active brake at low voltage before enabling brake/hybrid stop modes
+   under load.
